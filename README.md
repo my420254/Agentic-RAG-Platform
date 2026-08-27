@@ -23,9 +23,9 @@
 | --- | --- |
 | API | FastAPI, Pydantic, SSE |
 | Agent 编排 | 轻量状态机设计，接口可迁移到 LangGraph StateGraph |
-| RAG | 文档切片、关键词召回、轻量重排、证据引用 |
-| 记忆 | Redis 优先，内存 fallback；用于 session state、短期记忆、限流和 checkpoint 指针 |
-| 工具调用 | Tool registry、schema 校验、业务校验、结构化错误 |
+| RAG | 文档切片、BM25-style 召回、轻量向量相似度、RRF 融合、证据引用 |
+| 记忆与状态 | Redis 优先，内存 fallback；用于 session state、任务状态、取消标记、限流和 checkpoint 指针 |
+| 工具调用 | Tool registry、input schema、意图白名单、业务校验、结构化错误 |
 | 前端 | Vue3, TypeScript, Vite |
 | 测试 | pytest |
 
@@ -35,9 +35,11 @@
 | --- | --- |
 | FastAPI 接入 | 已实现 health、ingest、chat、chat stream、memory API |
 | SSE 流式事件 | 已实现 workflow 节点级事件输出 |
-| RAG 检索 | 已实现文档切片、轻量关键词召回、证据排序和 citation 返回 |
+| RAG 检索 | 已实现文档切片、BM25-style 召回、轻量向量相似度、RRF 融合和 citation 返回 |
 | Redis 记忆 | 已实现 Redis 优先、内存 fallback 的 session memory |
-| 工具调用 | 已实现 ToolRegistry、意图白名单、结构化错误 |
+| 任务管理 | 已实现 task_id、状态查询、取消请求和节点事件记录 |
+| 限流 | 已实现 Redis 优先、内存 fallback 的固定窗口限流 |
+| 工具调用 | 已实现 ToolRegistry、input schema、意图白名单、结构化错误 |
 | Vue3 前端 | 已实现 session、任务输入、事件流展示和 memory 读取 |
 | Kafka / 队列 | 当前为架构预留，适合接入 Kafka 或 Redis Stream |
 | 向量数据库 | 当前为接口预留，适合替换为 Milvus、pgvector 或 Chroma |
@@ -68,8 +70,10 @@ FastAPI SSE API
 ```mermaid
 flowchart TB
     U[Vue3 Client] --> API[FastAPI SSE API]
-    API --> LIM[Rate Limit / Auth]
+    API --> LIM[Rate Limit]
+    API --> TS[Task Service]
     LIM --> WF[Agent Workflow]
+    TS --> WF
     WF --> R[Retriever]
     WF --> RR[Reranker]
     WF --> T[Tool Registry]
@@ -121,11 +125,26 @@ flowchart LR
 
 - `understand`：识别用户意图，提取查询和约束；
 - `retrieve`：从知识库召回候选片段；
-- `rerank`：根据关键词覆盖、元数据和长度惩罚保留证据；
+- `rerank`：融合 BM25-style 排名和轻量向量相似度排名，使用 RRF 保留证据；
 - `tool`：需要实时信息或业务动作时进入工具 registry；
 - `answer`：基于证据生成最终回答，同时返回引用片段。
 
 这种拆法让系统可以定位问题来源，也方便后续接入 LangGraph checkpoint、评测集和线上 trace。
+
+### 混合检索与 RRF
+
+当前实现保留了一个不需要下载 embedding 模型的轻量混合检索器：
+
+```text
+query
+  -> tokenize
+  -> BM25-style lexical ranking
+  -> sparse hash-vector cosine ranking
+  -> RRF rank fusion
+  -> top evidence with citation
+```
+
+这里的轻量向量相似度不是生产向量库，只用于让本仓库开箱可跑。生产版本可以把 `_vector_ranking` 替换为 `bge-m3`、`text-embedding-v3`、Milvus、pgvector 或 Chroma，RRF 融合接口保持不变。
 
 ### 分层记忆
 
@@ -153,6 +172,18 @@ Redis 在这个项目中的定位不是简单缓存，而是大模型应用运�
 后端通过 SSE 输出每个节点的运行事件，包括理解、召回、重排、工具调用和最终回答。前端可以实时展示过程，后端也可以把同一套事件写入 trace 系统，用于调试和监控。
 
 SSE 适合这个项目的原因是服务端持续推送、客户端轻量接收，符合 RAG 问答和 Agent trace 的单向流式输出模式。如果需要双向实时协作、多人编辑或持续控制信号，再替换为 WebSocket 更合适。
+
+### 任务状态与取消
+
+项目新增 `TaskService` 管理任务生命周期：
+
+```text
+pending -> running -> completed
+pending/running -> cancel_requested -> cancelled
+running -> failed
+```
+
+前端或外部系统可以先提交任务拿到 `task_id`，再通过 SSE 读取节点事件，必要时调用取消接口。workflow 会在节点边界检查取消标记；如果底层工具是阻塞调用，生产版本需要配合 timeout、异步 worker 或子进程隔离。
 
 前端 Vue3 的核心职责不是做一个普通聊天框，而是展示 Agent 的中间过程：
 
@@ -202,11 +233,45 @@ curl -N -X POST http://localhost:8000/api/chat/stream \
   -d '{"session_id":"demo","message":"如何限制 RAG 幻觉？"}'
 ```
 
+### 任务 API
+
+```bash
+curl -X POST http://localhost:8000/api/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"demo","message":"如何限制 RAG 幻觉？"}'
+
+curl http://localhost:8000/api/tasks/<task_id>
+
+curl -N http://localhost:8000/api/tasks/<task_id>/events
+
+curl -X POST http://localhost:8000/api/tasks/<task_id>/cancel
+```
+
+### 工具 API
+
+```bash
+curl http://localhost:8000/api/tools
+
+curl -X POST http://localhost:8000/api/tools/policy_lookup/call \
+  -H 'Content-Type: application/json' \
+  -d '{"intent":"qa","payload":{"topic":"RAG 幻觉控制"}}'
+```
+
 ### 单元测试
 
 ```bash
 python -m pytest tests
 ```
+
+## 延伸文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/architecture.md`](docs/architecture.md) | 后端模块、请求链路、任务状态和生产化扩展 |
+| [`docs/code_walkthrough.md`](docs/code_walkthrough.md) | 按代码路径解释每个模块怎么读 |
+| [`docs/package_choices.md`](docs/package_choices.md) | FastAPI、redis-py、Element Plus 等依赖的选型边界 |
+| [`docs/technical_qna.md`](docs/technical_qna.md) | RAG、RRF、Redis、SSE、工具 schema 等技术问答 |
+| [`docs/development_journal.md`](docs/development_journal.md) | 开发过程中的设计演进和取舍 |
 
 ## 扩展方向
 

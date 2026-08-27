@@ -23,19 +23,50 @@
 - 是否需要 reranker；
 - prompt 是否明确要求引用证据并在证据不足时拒答。
 
-## 4. Redis 在这里承担什么职责？
+## 4. BM25 和向量结果怎么合并？
+
+当前实现用 RRF（Reciprocal Rank Fusion）合并两路排名，而不是直接相加原始分数。原因是 BM25 分数、向量 cosine 分数和 reranker 分数分布不同，直接加权很容易受尺度影响。
+
+流程：
+
+```text
+query
+  -> BM25-style ranking
+  -> sparse vector ranking
+  -> RRF: score += 1 / (k + rank)
+  -> top evidence
+```
+
+BM25 更适合错误码、接口名、专有名词等精确匹配；向量召回更适合同义表达和口语化问题。RRF 用排名融合，能减少不同召回器分数不可比的问题。
+
+## 5. Redis 在这里承担什么职责？
 
 Redis 主要承担短期会话态、最近消息、限流计数、checkpoint 指针和异步工具回调。长期语义知识更适合向量库或关系库。这样可以避免把任务状态、用户偏好、知识文档混在一个存储里。
 
-## 5. SSE 怎么接入？
+## 6. SSE 怎么接入？
 
 后端使用 `StreamingResponse` 输出 `text/event-stream`。每个 Agent 节点产生一个事件，例如 `understand`、`retrieve`、`rerank`、`tool`、`answer`。前端用 `fetch` 和 `ReadableStream` 解析事件并实时渲染。
 
-## 6. 用户取消任务如何设计？
+## 7. 用户取消任务如何设计？
 
-取消命令可以写入任务控制通道，例如 CommandBus、Redis Stream 或 checkpoint 状态。runtime 在节点边界检查取消信号；如果当前工具是阻塞调用，则需要超时控制或异步任务取消机制。取消事件要写入 trace，避免恢复时拿到错误上下文。
+取消命令需要写入任务控制通道，而不是只改前端 UI。当前项目有 `TaskService`，任务状态包括 `pending`、`running`、`completed`、`cancel_requested`、`cancelled`、`failed`。
 
-## 7. 工具 schema 怎么设计？
+当前流程：
+
+```text
+POST /api/tasks
+  -> 返回 task_id
+GET /api/tasks/{task_id}/events
+  -> SSE 推送节点事件
+POST /api/tasks/{task_id}/cancel
+  -> 写入 cancel_requested
+workflow 节点边界检查取消状态
+  -> cancelled
+```
+
+如果当前工具是阻塞调用，则需要 timeout、异步任务取消或子进程隔离。取消事件要写入 trace，避免恢复时拿到错误上下文。
+
+## 8. 工具 schema 怎么设计？
 
 工具 schema 不只描述参数类型，还应该包含运行约束：
 
@@ -50,11 +81,13 @@ Redis 主要承担短期会话态、最近消息、限流计数、checkpoint 指
 
 参数格式正确不代表业务合法，例如订单号存在但不属于当前用户，仍然必须拒绝。
 
-## 8. LangChain 和 LangGraph 如何取舍？
+当前项目通过 `/api/tools` 暴露工具描述，通过 `/api/tools/{tool_name}/call` 调用工具。它不是完整 MCP server，但已经保留了 MCP/function calling 需要的 `name`、`description`、`input_schema` 和结构化返回边界。
+
+## 9. LangChain 和 LangGraph 如何取舍？
 
 线性单轮流程可以用 LangChain chain；如果系统存在状态、多分支、循环、人工确认、中断恢复和失败重试，就更适合 LangGraph。当前项目保留轻量 workflow，是为了把状态边界先做清楚，后续可以迁移到 LangGraph StateGraph。
 
-## 9. 如何限制幻觉？
+## 10. 如何限制幻觉？
 
 项目从四层控制幻觉：
 
@@ -63,7 +96,7 @@ Redis 主要承担短期会话态、最近消息、限流计数、checkpoint 指
 - 工具层：实时事实以工具或数据库返回为准；
 - 审计层：citation、trace、答案校验和人工接管。
 
-## 10. 生产化还需要补什么？
+## 11. 生产化还需要补什么？
 
 当前仓库是可扩展骨架，生产化可继续补充：
 

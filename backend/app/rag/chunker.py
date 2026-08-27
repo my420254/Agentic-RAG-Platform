@@ -8,7 +8,7 @@ def normalize_text(text: str) -> str:
 
 
 def split_text(text: str, *, max_chars: int = 420, overlap: int = 80) -> list[str]:
-    """Simple paragraph-aware chunker for portfolio demonstration."""
+    """面向演示和小规模知识库的轻量文本切片器。"""
     text = normalize_text(text)
     if not text:
         return []

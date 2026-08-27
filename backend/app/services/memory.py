@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover - optional dependency in docs-only use
 
 
 class MemoryService:
-    """Redis-first session memory with deterministic in-memory fallback."""
+    """Redis 优先、内存兜底的会话记忆服务。"""
 
     def __init__(self) -> None:
         self._fallback: dict[str, deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=20))

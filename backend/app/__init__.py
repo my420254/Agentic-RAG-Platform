@@ -1,1 +1,1 @@
-"""Agentic RAG platform backend."""
+"""Agentic RAG 平台后端包。"""

@@ -29,6 +29,20 @@
 | 前端 | Vue3, TypeScript, Vite |
 | 测试 | pytest |
 
+## 当前实现范围
+
+| 能力 | 当前状态 |
+| --- | --- |
+| FastAPI 接入 | 已实现 health、ingest、chat、chat stream、memory API |
+| SSE 流式事件 | 已实现 workflow 节点级事件输出 |
+| RAG 检索 | 已实现文档切片、轻量关键词召回、证据排序和 citation 返回 |
+| Redis 记忆 | 已实现 Redis 优先、内存 fallback 的 session memory |
+| 工具调用 | 已实现 ToolRegistry、意图白名单、结构化错误 |
+| Vue3 前端 | 已实现 session、任务输入、事件流展示和 memory 读取 |
+| Kafka / 队列 | 当前为架构预留，适合接入 Kafka 或 Redis Stream |
+| 向量数据库 | 当前为接口预留，适合替换为 Milvus、pgvector 或 Chroma |
+| 线上压测 | 当前未包含压测结果，后续可补 Locust / k6 |
+
 ## 架构
 
 ```text
@@ -186,6 +200,12 @@ npm run dev
 curl -N -X POST http://localhost:8000/api/chat/stream \
   -H 'Content-Type: application/json' \
   -d '{"session_id":"demo","message":"如何限制 RAG 幻觉？"}'
+```
+
+### 单元测试
+
+```bash
+python -m pytest tests
 ```
 
 ## 扩展方向

@@ -51,6 +51,54 @@ FastAPI SSE API
         +-- answer: 带证据的最终回答
 ```
 
+```mermaid
+flowchart TB
+    U[Vue3 Client] --> API[FastAPI SSE API]
+    API --> LIM[Rate Limit / Auth]
+    LIM --> WF[Agent Workflow]
+    WF --> R[Retriever]
+    WF --> RR[Reranker]
+    WF --> T[Tool Registry]
+    WF --> M[Memory Service]
+    M --> Redis[(Redis)]
+    R --> KB[(Document Store / Vector DB)]
+    T --> EXT[Business APIs]
+    WF --> SSE[SSE Event Stream]
+    SSE --> U
+```
+
+## 高并发设计预留
+
+当前仓库是可运行的平台骨架，没有把 Kafka、Redis Cluster、向量数据库集群全部强绑定进去；但接口按真实大模型应用系统的扩展方式设计，后续可以平滑演进为高并发服务。
+
+| 压力点 | 典型问题 | 设计处理 |
+| --- | --- | --- |
+| 1 万级并发连接 | SSE / WebSocket 长连接占用 worker 和连接数 | API 层只维护轻量事件流，重任务下沉到 workflow / queue |
+| 10 万级请求峰值 | 瞬时请求打爆模型服务和检索服务 | Kafka / Redis Stream 做削峰，按租户和优先级消费 |
+| 模型推理慢 | LLM 是整体瓶颈，不能无限扩 FastAPI | vLLM / Triton / OpenAI-compatible endpoint 独立伸缩 |
+| 检索压力大 | 向量召回和 rerank 会放大延迟 | BM25 + vector hybrid recall，reranker 批处理，热门 query 缓存 |
+| 会话状态膨胀 | 多轮历史直接塞 prompt 成本高 | Redis 保存 session state、短期记忆、checkpoint 指针 |
+| 任务取消 | 用户关闭页面后后端仍在跑 | cancel token / task id 贯穿 workflow，节点边界检查取消状态 |
+| 重试与幂等 | 工具调用失败或重复提交可能产生副作用 | request id、tool call id、幂等 key 和结构化错误 |
+
+高并发版本可以采用如下链路：
+
+```mermaid
+flowchart LR
+    A[Nginx / API Gateway] --> B[FastAPI Ingress]
+    B --> C[Redis Rate Limit]
+    B --> D[Kafka Task Topic]
+    D --> E[Agent Workers]
+    E --> F[Retriever / Reranker]
+    E --> G[LLM Serving Pool]
+    E --> H[Tool Workers]
+    E --> I[Kafka Event Topic]
+    I --> J[SSE Gateway]
+    J --> K[Vue Client]
+```
+
+这里 Kafka 负责任务削峰和事件解耦，Redis 负责低延迟状态、限流和 checkpoint 指针，FastAPI 只做接入与流式返回，模型服务独立扩容。这样可以把“连接并发”和“模型计算并发”拆开，不会让 Web API 直接承受所有重计算。
+
 ## 核心设计
 
 ### Agentic RAG
@@ -75,9 +123,32 @@ FastAPI SSE API
 
 这样可以避免长对话检索变慢、冲突记忆难删除、过期事实污染回答等问题。
 
+Redis 在这个项目中的定位不是简单缓存，而是大模型应用运行时状态层：
+
+| Redis 数据 | 典型结构 | 用途 |
+| --- | --- | --- |
+| 会话消息 | list / stream | 保留近期上下文 |
+| 用户偏好 | hash | 保存轻量 profile |
+| 限流计数 | string + TTL | tenant / user / api key 粒度限流 |
+| checkpoint 指针 | string / hash | 记录长任务恢复位置 |
+| cancel flag | string + TTL | 前端取消后让 workflow 节点及时停止 |
+| 热门检索缓存 | string / hash | 降低重复 query 的检索和 rerank 成本 |
+
 ### SSE 流式事件
 
 后端通过 SSE 输出每个节点的运行事件，包括理解、召回、重排、工具调用和最终回答。前端可以实时展示过程，后端也可以把同一套事件写入 trace 系统，用于调试和监控。
+
+SSE 适合这个项目的原因是服务端持续推送、客户端轻量接收，符合 RAG 问答和 Agent trace 的单向流式输出模式。如果需要双向实时协作、多人编辑或持续控制信号，再替换为 WebSocket 更合适。
+
+前端 Vue3 的核心职责不是做一个普通聊天框，而是展示 Agent 的中间过程：
+
+| 前端区域 | 展示内容 |
+| --- | --- |
+| Chat Panel | 用户问题、最终回答、流式 token |
+| Evidence Panel | 检索片段、来源、相关性分数 |
+| Trace Timeline | understand / retrieve / rerank / tool / answer 节点事件 |
+| Tool Result | 工具参数、返回值、错误信息 |
+| Session State | 当前会话 id、记忆摘要、取消状态 |
 
 ### 工具安全边界
 

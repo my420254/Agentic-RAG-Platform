@@ -1,32 +1,32 @@
 # Agentic-RAG-Platform
 
-面向企业知识库和多工具任务的 Agentic RAG 平台骨架。这个仓库用于展示大模型应用工程中的完整链路：文档接入、切片检索、重排、会话记忆、SSE 流式输出、工具调用、状态管理和可观测性。
+面向企业知识库、多轮问答和多工具任务的 Agentic RAG 平台骨架。项目重点不是做一个简单聊天界面，而是把大模型应用中的关键工程链路拆清楚：文档接入、切片检索、重排、会话记忆、SSE 流式输出、工具调用、状态管理和可观测性。
 
-## 为什么做这个项目
+## 项目定位
 
-普通 RAG demo 往往只做“上传文档 -> 向量检索 -> 调模型回答”。真正面试和落地时，面试官更关心的是：
+传统 RAG demo 通常只覆盖“上传文档、检索片段、调用模型回答”。真实系统还需要处理更多工程问题：
 
-- chunk 怎么切，召回不准怎么排查；
-- 检索结果过多时如何 rerank 和融合；
-- 多轮会话、用户偏好、任务状态放哪里；
-- FastAPI 怎么通过 SSE 把 Agent 中间过程流式推给前端；
-- Redis 在 Agent 系统里到底存什么；
-- 工具 schema 怎么设计，参数合法但业务非法怎么拦；
-- 用户点停止、服务重启、工具超时、模型超时怎么处理；
-- 如何做评测、监控、trace 和灰度。
+- 文档清洗和 chunk 策略如何影响召回质量；
+- 检索结果过多时如何 rerank 和证据融合；
+- 多轮会话、用户偏好、任务状态应该放在哪里；
+- 后端如何把 Agent 中间过程流式推给前端；
+- Redis 在 Agent 系统里如何承担短期记忆、限流和 checkpoint 指针；
+- 工具 schema 如何结合业务权限、参数校验和结构化错误；
+- 用户取消、服务重启、工具超时、模型超时如何落到运行时设计；
+- 如何为评测、监控、trace 和灰度扩展预留接口。
 
-所以这个项目不是聊天壳子，而是一个可扩展的 Agentic RAG 工程样板。
+因此这个仓库按 Agentic RAG 的工程样板组织，强调链路可控、状态可追踪、模块可替换。
 
 ## 技术栈
 
 | 层级 | 技术 |
 | --- | --- |
 | API | FastAPI, Pydantic, SSE |
-| Agent 编排 | LangGraph 风格状态机，后续可替换为真实 LangGraph StateGraph |
+| Agent 编排 | 轻量状态机设计，接口可迁移到 LangGraph StateGraph |
 | RAG | 文档切片、关键词召回、轻量重排、证据引用 |
 | 记忆 | Redis 优先，内存 fallback；用于 session state、短期记忆、限流和 checkpoint 指针 |
 | 工具调用 | Tool registry、schema 校验、业务校验、结构化错误 |
-| 前端 | Vue3 + TypeScript + Vite |
+| 前端 | Vue3, TypeScript, Vite |
 | 测试 | pytest |
 
 ## 架构
@@ -53,47 +53,41 @@ FastAPI SSE API
 
 ## 核心设计
 
-### 1. Agentic RAG 而不是被动 RAG
+### Agentic RAG
 
-被动 RAG 是一次检索一次回答。这里按 Agentic RAG 思路拆成多个节点：
+项目把一次问答拆成多个可观测节点，而不是一次检索后直接生成：
 
-- `understand`：识别用户意图，提取查询和约束。
-- `retrieve`：从知识库召回候选片段。
-- `rerank`：根据关键词覆盖、元数据和长度惩罚做轻量重排。
-- `tool`：需要实时信息时走工具 registry。
-- `answer`：输出答案，同时返回证据片段。
+- `understand`：识别用户意图，提取查询和约束；
+- `retrieve`：从知识库召回候选片段；
+- `rerank`：根据关键词覆盖、元数据和长度惩罚保留证据；
+- `tool`：需要实时信息或业务动作时进入工具 registry；
+- `answer`：基于证据生成最终回答，同时返回引用片段。
 
-### 2. 记忆不全塞向量库
+这种拆法让系统可以定位问题来源，也方便后续接入 LangGraph checkpoint、评测集和线上 trace。
 
-项目把记忆分成三类：
+### 分层记忆
 
-- 当前会话消息：适合 Redis list / hash。
-- 长期偏好：适合后续接向量库或关系库。
-- checkpoint 指针：适合 Redis key-value，指向持久化图状态。
+项目没有把所有对话历史都塞进向量库，而是把记忆分成三类：
 
-这样可以避免长对话全部向量化导致的检索慢、冲突记忆难删除、过期事实污染回答。
+- 当前会话消息：适合 Redis list / hash；
+- 长期偏好和语义知识：适合向量库或关系库；
+- checkpoint 指针和任务状态：适合 Redis key-value。
 
-### 3. SSE 流式输出
+这样可以避免长对话检索变慢、冲突记忆难删除、过期事实污染回答等问题。
 
-后端不是等整个回答生成完才返回，而是把每个 Agent 节点的状态事件逐步推给前端：
+### SSE 流式事件
 
-- `understand`：正在理解任务。
-- `retrieve`：找到多少候选证据。
-- `rerank`：保留哪些证据。
-- `tool`：是否调用工具。
-- `answer`：最终回答。
+后端通过 SSE 输出每个节点的运行事件，包括理解、召回、重排、工具调用和最终回答。前端可以实时展示过程，后端也可以把同一套事件写入 trace 系统，用于调试和监控。
 
-这类设计能让用户看到进度，也方便后续做 trace 和监控。
+### 工具安全边界
 
-### 4. 工具调用的安全边界
+工具调用不只做 JSON schema 校验，还保留业务校验入口：
 
-工具层不只检查 JSON 类型，还要做业务校验：
-
-- 订单、用户、租户是否匹配；
-- 工具是否允许当前意图调用；
-- 参数是否越权；
-- 工具超时后是否可重试；
-- 返回数据是否可信。
+- 当前意图是否允许调用该工具；
+- 参数类型合法后，业务对象是否属于当前用户或租户；
+- 工具超时后是否允许重试；
+- 返回数据是否可信；
+- 异常是否能结构化返回给上层 workflow。
 
 ## 运行方式
 
@@ -123,30 +117,24 @@ curl -N -X POST http://localhost:8000/api/chat/stream \
   -d '{"session_id":"demo","message":"如何限制 RAG 幻觉？"}'
 ```
 
-## 面试可讲点
+## 扩展方向
 
-### 问：LangChain 和 LangGraph 什么时候用？
+| 当前实现 | 可替换为 |
+| --- | --- |
+| 关键词召回 | Milvus / pgvector / Chroma + BM25 混合召回 |
+| 轻量 rerank | bge-reranker / cross-encoder / LLM rerank |
+| 自定义 workflow | LangGraph StateGraph + checkpoint |
+| 内存 fallback | Redis Cluster / Postgres checkpoint |
+| 简单工具 registry | MCP / Function Calling / 工具权限中心 |
+| 本地事件流 | OpenTelemetry / Langfuse / Kafka 事件日志 |
 
-答：如果只是单轮 RAG，LangChain chain 足够；如果要做多节点状态、条件分支、工具调用、失败重试、人工反馈和恢复，就要上 LangGraph。这个项目当前用轻量 workflow 展示边界，后续可以直接替换成 StateGraph。
+## 与其他项目的关系
 
-### 问：Redis 在 Agent 里存什么？
+`Agentic-RAG-Platform` 聚焦企业知识库、RAG 服务化、流式交互和多工具调用。
 
-答：Redis 不只是缓存答案。它可以存 session state、短期记忆、限流计数、checkpoint 指针、异步工具回调和分布式锁。长期语义记忆再接向量库。
+[`Embodied-Agent-Runtime`](https://github.com/my420254/Embodied-Agent-Runtime) 聚焦具身任务运行时，包括 ROS 文本接入、任务中断、栈式恢复、反思重试和 benchmark 对齐。
 
-### 问：RAG 答非所问怎么排查？
-
-答：按清洗、切片、embedding、metadata filter、top_k、rerank、prompt、模型生成依次排查。不要一上来就改 prompt。
-
-### 问：SSE 断线重连怎么做？
-
-答：事件要有 `event_id` 和 `trace_id`，后端把节点事件写入事件日志。前端重连带 last event id，后端从 checkpoint 或事件日志续发。
-
-## 当前状态
-
-这是一个作品集骨架，重点展示系统设计、接口边界和工程文档。它和 `OurAgent-he1` 互补：
-
-- `OurAgent-he1` 强在具身任务、ROS 文本接入、中断恢复、反思。
-- `Agentic-RAG-Platform` 强在企业知识库、RAG、SSE、Redis、多工具服务化。
+两个项目分别覆盖大模型应用中的“知识服务”和“任务执行”两类核心场景。
 
 ## 许可
 

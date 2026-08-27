@@ -69,10 +69,10 @@ Agent 一次调用可能经过多个工具和多个检索步骤，如果前端�
 | 简单工具 registry | MCP / Function Calling / 工具权限中心 |
 | 本地事件流 | Kafka / OpenTelemetry / Langfuse |
 
-## 和 OurAgent-he1 的关系
+## 和 Embodied-Agent-Runtime 的关系
 
-`OurAgent-he1` 解决的是具身任务 runtime：ROS 文本命令、任务中断、栈式恢复、反思重试。
+`Embodied-Agent-Runtime` 解决的是具身任务 runtime：ROS 文本命令、任务中断、栈式恢复、反思重试。
 
 `Agentic-RAG-Platform` 解决的是企业知识库服务化：RAG、Redis、SSE、多轮会话和工具调用。
 
-两个项目合起来，可以覆盖智能体研发面试里的主要系统问题。
+两个项目合起来，可以覆盖智能体研发中的主要系统问题。

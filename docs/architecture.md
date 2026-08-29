@@ -14,17 +14,22 @@
 
 ```text
 backend/app/main.py
-  FastAPI 入口，暴露 health / ingest / chat / chat_stream / memory。
+  FastAPI 入口，暴露 health / ingest / documents / retrieve / eval / chat / chat_stream / memory。
 
 backend/app/agent/
   AgentState 定义运行状态；AgentWorkflow 定义 understand -> retrieve -> rerank -> tool -> answer。
 
 backend/app/rag/
-  chunker 负责文档切片；retriever 负责 BM25-style 召回、轻量向量相似度、RRF 融合和 Evidence API。
+  chunker 负责文档切片；retriever 负责 BM25-style 召回、轻量向量相似度、RRF 融合和 Evidence API；
+  quality 负责证据质量门控；evaluator 负责离线检索评测。
+
+backend/app/llm/
+  可选 OpenAI-compatible 客户端，默认关闭；接 vLLM/Qwen 时用于最终答案生成。
 
 backend/app/services/
   memory 负责 Redis 优先、内存 fallback 的会话记忆；tasks 负责任务状态、取消和事件记录；
-  rate_limit 负责 Redis 优先、内存 fallback 的限流；events 负责 SSE 格式化。
+  rate_limit 负责 Redis 优先、内存 fallback 的限流；events 负责 SSE 格式化；
+  trace 负责把任务事件整理成 summary。
 
 backend/app/tools/
   registry 负责工具注册、意图白名单和业务校验。
@@ -40,10 +45,11 @@ frontend/
 3. workflow 执行 `understand` 节点，输出意图和改写 query。
 4. `retrieve` 节点从知识库召回候选证据。
 5. `rerank` 节点通过 RRF 融合 BM25-style 排名和轻量向量相似度排名，保留 top evidence。
-6. `tool` 节点根据意图和关键词选择工具。
-7. `answer` 节点生成带 citation 的回答。
-8. 每个节点通过 SSE 推给前端。
-9. MemoryService 把用户和 assistant 消息写入 Redis 或内存 fallback。
+6. `quality` 节点判断证据是否足够，低证据场景拒答。
+7. `tool` 节点根据意图和关键词选择工具。
+8. `answer` 节点生成带 citation 的回答；如果启用 `RAG_USE_LLM`，调用本地 vLLM/Qwen，否则走模板 fallback。
+9. 每个节点通过 SSE 推给前端。
+10. MemoryService 把用户和 assistant 消息写入 Redis 或内存 fallback。
 
 ## 为什么这样拆
 
@@ -85,6 +91,19 @@ POST /api/tasks/{task_id}/cancel
 
 workflow 在节点边界检查 `cancel_requested`。真实生产系统如果接入阻塞工具，还需要 timeout、异步 worker 或子进程隔离，否则无法立即打断底层调用。
 
+## 检索评测链路
+
+项目内置一个小型 retrieval eval：
+
+```text
+data/eval/retrieval_cases.json
+  -> scripts/run_rag_eval.py
+  -> backend/app/rag/evaluator.py
+  -> hit_rate / mrr / failed_cases
+```
+
+它不声称代表真实线上效果，而是作为工程闭环：每次改 chunk、tokenize、BM25、RRF 或 rerank，都能用固定 case 判断是否退化。
+
 ## 生产版扩展
 
 | 当前骨架 | 生产替换 |
@@ -95,6 +114,7 @@ workflow 在节点边界检查 `cancel_requested`。真实生产系统如果接�
 | 内存 fallback | Redis Cluster / Postgres checkpoint |
 | 简单工具 registry | MCP / Function Calling / 工具权限中心 |
 | 本地事件流 | Kafka / OpenTelemetry / Langfuse |
+| Demo retrieval eval | 标注评测集 + RAGAS/DeepEval/业务人工复核 |
 
 ## 和 Embodied-Agent-Runtime 的关系
 

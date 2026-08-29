@@ -1,0 +1,32 @@
+[
+  {
+    "case_id": "rag_quality_chain",
+    "question": "RAG 答案不可靠时应该先排查哪些环节？",
+    "expected_doc_ids": ["rag_operations"],
+    "tags": ["rag", "quality"]
+  },
+  {
+    "case_id": "hallucination_guard",
+    "question": "如何让知识库问答在证据不足时拒答并减少幻觉？",
+    "expected_doc_ids": ["rag_operations", "rag_handbook"],
+    "tags": ["hallucination", "citation"]
+  },
+  {
+    "case_id": "agent_harness_boundary",
+    "question": "Agent Harness 需要负责哪些运行时边界？",
+    "expected_doc_ids": ["agent_harness"],
+    "tags": ["agent", "harness"]
+  },
+  {
+    "case_id": "ticket_inc_1001",
+    "question": "INC-1001 账单接口超时应该如何处理？",
+    "expected_doc_ids": ["incident_playbook"],
+    "tags": ["ticket", "reliability"]
+  },
+  {
+    "case_id": "vector_db_slow",
+    "question": "向量库慢查询通常有哪些原因，如何缓解？",
+    "expected_doc_ids": ["incident_playbook"],
+    "tags": ["retrieval", "latency"]
+  }
+]

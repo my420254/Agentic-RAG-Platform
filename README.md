@@ -35,12 +35,17 @@
 | --- | --- |
 | FastAPI 接入 | 已实现 health、ingest、chat、chat stream、memory API |
 | SSE 流式事件 | 已实现 workflow 节点级事件输出 |
-| RAG 检索 | 已实现文档切片、BM25-style 召回、轻量向量相似度、RRF 融合和 citation 返回 |
+| RAG 检索 | 已实现文档切片、BM25-style 召回、轻量向量相似度、RRF 融合、检索诊断和 citation 返回 |
+| 文档管理 | 已实现文档写入、文档列表、chunk 统计和用户文档清理 |
+| 证据质量门控 | 已实现 evidence quality gate，证据不足时拒答，避免无证据生成 |
+| 检索评测 | 已实现离线 retrieval eval，输出 Hit@K、MRR、失败 case |
+| LLM 生成 | 默认模板 fallback，设置环境变量后可接 vLLM/Qwen OpenAI-compatible 接口 |
 | Redis 记忆 | 已实现 Redis 优先、内存 fallback 的 session memory |
 | 任务管理 | 已实现 task_id、状态查询、取消请求和节点事件记录 |
 | 限流 | 已实现 Redis 优先、内存 fallback 的固定窗口限流 |
-| 工具调用 | 已实现 ToolRegistry、input schema、意图白名单、结构化错误 |
-| Vue3 前端 | 已实现 session、任务输入、事件流展示和 memory 读取 |
+| 工具调用 | 已实现 ToolRegistry、input schema、意图白名单、结构化错误和演示工单工具 |
+| Trace | 已实现任务事件记录和 trace summary 查询 |
+| Vue3 前端 | 已实现 session、任务输入、文档管理、检索证据、诊断/评测、事件流、工具结果和 memory 读取 |
 | Kafka / 队列 | 当前为架构预留，适合接入 Kafka 或 Redis Stream |
 | 向量数据库 | 当前为接口预留，适合替换为 Milvus、pgvector 或 Chroma |
 | 线上压测 | 当前未包含压测结果，后续可补 Locust / k6 |
@@ -207,6 +212,17 @@ running -> failed
 
 ## 运行方式
 
+### 端口规划
+
+| 端口 | 服务 | 说明 |
+| --- | --- | --- |
+| `5173` | Vue 开发工作台 | 前端页面，浏览器入口 |
+| `18080` | FastAPI 业务后端 | RAG、任务状态、工具调用、Trace、模型适配 |
+| `18003` | Qwen vLLM | Qwen3.6-27B，默认模型入口 |
+| `18004` | Qwen vLLM | Qwen3.6-27B，备用或并行测试入口 |
+
+前端只访问 FastAPI；FastAPI 再访问 vLLM。这样模型端口、API key、工具权限和检索逻辑都不会暴露给浏览器。
+
 ### 后端
 
 ```bash
@@ -214,7 +230,19 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 18080
+```
+
+也可以使用仓库根目录的 Compose 一次启动 Redis、API 和 Vue 工作台：
+
+```bash
+docker compose up
+```
+
+打开：
+
+```text
+http://localhost:5173
 ```
 
 ### 前端
@@ -228,31 +256,164 @@ npm run dev
 ### 快速测试
 
 ```bash
-curl -N -X POST http://localhost:8000/api/chat/stream \
+curl -N -X POST http://localhost:18080/api/chat/stream \
   -H 'Content-Type: application/json' \
   -d '{"session_id":"demo","message":"如何限制 RAG 幻觉？"}'
 ```
 
+加载演示知识库：
+
+```bash
+python scripts/load_demo_knowledge.py --api-base http://localhost:18080
+```
+
+运行端到端冒烟演示：
+
+```bash
+scripts/demo_smoke.sh
+```
+
+运行离线检索评测：
+
+```bash
+python scripts/run_rag_eval.py --top-k 3
+```
+
+当前演示评测集覆盖 RAG 幻觉治理、Agent Harness、故障工单、向量库慢查询等场景。一次参考输出：
+
+```text
+total=5, top_k=3, hit_rate=1.0, mrr=1.0
+```
+
+这个指标只是演示评测，不等同于真实线上效果。它的价值是证明项目具备“固定评测集 + 指标 + 失败 case 回归”的工程闭环。
+
+### 文档、检索和评测 API
+
+```bash
+curl http://localhost:18080/api/documents
+
+curl -X POST http://localhost:18080/api/retrieve \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"INC-1001 账单接口超时怎么处理","top_k":3}'
+
+curl -X POST http://localhost:18080/api/eval/retrieval \
+  -H 'Content-Type: application/json' \
+  -d '{"top_k":3}'
+
+curl http://localhost:18080/api/tasks/<task_id>/trace
+```
+
+### 接入真实 vLLM / Qwen
+
+默认不调用大模型，保证测试和演示稳定。如果要接你的本地 Qwen/vLLM 服务：
+
+```bash
+export RAG_USE_LLM=true
+export LLM_API_BASE=http://192.168.27.250:18003/v1
+export LLM_MODEL=Qwen3.6-27B
+export LLM_API_KEY=qwen-local-key
+export LLM_ENABLE_THINKING=false
+export LLM_MAX_TOKENS=512
+cd backend && uvicorn app.main:app --reload --port 18080
+```
+
+仓库根目录支持 `.env` 本地配置，`./scripts/run_backend_with_qwen.sh` 会自动读取。DeepSeek 备用模型的 API Key 填这里：
+
+```bash
+LLM_FALLBACK_API_KEY=sk-你的DeepSeekKey
+```
+
+`.env` 已被 `.gitignore` 忽略，不会上传。公开仓库只提交 `.env.example`。
+
+本地 Qwen 不可用时，后端会按顺序尝试：
+
+```text
+primary:  http://192.168.27.250:18003/v1  -> Qwen3.6-27B
+fallback: https://api.deepseek.com         -> deepseek-v4-flash
+```
+
+验证 DeepSeek key：
+
+```bash
+./scripts/test_deepseek_api.sh
+```
+
+强制模拟本地 Qwen 不可用并验证 fallback：
+
+```bash
+LLM_API_BASE=http://127.0.0.1:9/v1 LLM_TIMEOUT_SECONDS=1 ./scripts/run_backend_with_qwen.sh
+curl -N -X POST http://localhost:18080/api/chat/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"fallback-demo","message":"如何限制 RAG 幻觉？"}'
+```
+
+也可以直接使用脚本：
+
+```bash
+./scripts/test_qwen_vllm.sh
+./scripts/run_backend_with_qwen.sh
+```
+
+启动后在另一个终端加载演示知识：
+
+```bash
+python scripts/load_demo_knowledge.py --api-base http://localhost:18080
+```
+
+后端也会默认自动加载 `data/demo_knowledge`。如果你清理过临时文档，或想手动恢复演示知识，可以调用：
+
+```bash
+curl -X POST http://localhost:18080/api/demo/load
+```
+
+前端 API 地址默认按当前页面主机推断。例如从 `http://<应用服务器IP>:5173` 打开页面时，前端会自动请求 `http://<应用服务器IP>:18080`。如果前后端分开部署，可以设置：
+
+```bash
+export VITE_API_BASE=http://<应用服务器IP>:18080
+```
+
+当前实测可用的本地模型服务：
+
+| 地址 | 模型 | 用途 |
+| --- | --- | --- |
+| `http://192.168.27.250:18003/v1` | `Qwen3.6-27B` | 默认演示入口 |
+| `http://192.168.27.250:18004/v1` | `Qwen3.6-27B` | 备用入口 / 并行压测入口 |
+| `https://api.deepseek.com` | `deepseek-v4-flash` | 本地模型不可用时的云端 fallback |
+
+后端提供模型状态检查：
+
+```bash
+curl http://localhost:18080/api/llm/status
+```
+
+后端也提供整体运行态检查：
+
+```bash
+curl http://localhost:18080/api/runtime/status
+```
+
+LLM 只负责基于证据生成最终回答；检索、质量门控、工具权限、任务状态和 Trace 都由后端代码控制，不交给模型自由发挥。
+
 ### 任务 API
 
 ```bash
-curl -X POST http://localhost:8000/api/tasks \
+curl -X POST http://localhost:18080/api/tasks \
   -H 'Content-Type: application/json' \
   -d '{"session_id":"demo","message":"如何限制 RAG 幻觉？"}'
 
-curl http://localhost:8000/api/tasks/<task_id>
+curl http://localhost:18080/api/tasks/<task_id>
 
-curl -N http://localhost:8000/api/tasks/<task_id>/events
+curl -N http://localhost:18080/api/tasks/<task_id>/events
 
-curl -X POST http://localhost:8000/api/tasks/<task_id>/cancel
+curl -X POST http://localhost:18080/api/tasks/<task_id>/cancel
 ```
 
 ### 工具 API
 
 ```bash
-curl http://localhost:8000/api/tools
+curl http://localhost:18080/api/tools
 
-curl -X POST http://localhost:8000/api/tools/policy_lookup/call \
+curl -X POST http://localhost:18080/api/tools/policy_lookup/call \
   -H 'Content-Type: application/json' \
   -d '{"intent":"qa","payload":{"topic":"RAG 幻觉控制"}}'
 ```
@@ -269,6 +430,11 @@ python -m pytest tests
 | --- | --- |
 | [`docs/architecture.md`](docs/architecture.md) | 后端模块、请求链路、任务状态和生产化扩展 |
 | [`docs/code_walkthrough.md`](docs/code_walkthrough.md) | 按代码路径解释每个模块怎么读 |
+| [`docs/evaluation_and_production.md`](docs/evaluation_and_production.md) | 检索评测、证据门控、压测和生产化演进 |
+| [`docs/project_story.md`](docs/project_story.md) | 项目背景、核心能力、技术价值和后续演进 |
+| [`docs/production_topology.md`](docs/production_topology.md) | 面向大模型应用落地的分层部署、并发扩容和可观测方案 |
+| [`docs/model_failover.md`](docs/model_failover.md) | 本地 Qwen/vLLM 与 DeepSeek 备用模型的降级策略 |
+| [`docs/qwen_vllm_integration.md`](docs/qwen_vllm_integration.md) | 接入本地 Qwen3.6-27B / vLLM 的端口、配置和验证方式 |
 | [`docs/package_choices.md`](docs/package_choices.md) | FastAPI、redis-py、Element Plus 等依赖的选型边界 |
 | [`docs/technical_qna.md`](docs/technical_qna.md) | RAG、RRF、Redis、SSE、工具 schema 等技术问答 |
 | [`docs/development_journal.md`](docs/development_journal.md) | 开发过程中的设计演进和取舍 |

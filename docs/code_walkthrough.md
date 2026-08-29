@@ -27,13 +27,22 @@ backend/app/agent/state.py
   AgentState 和 Evidence，保存一次任务执行过程中的状态。
 
 backend/app/agent/workflow.py
-  AgentWorkflow，串起 understand / retrieve / rerank / tool / answer。
+  AgentWorkflow，串起 understand / retrieve / rerank / quality / tool / answer。
 
 backend/app/rag/chunker.py
   文档清洗与切片。
 
 backend/app/rag/retriever.py
   轻量混合检索：BM25-style ranking + sparse hash-vector ranking + RRF。
+
+backend/app/rag/quality.py
+  证据质量门控，决定证据是否足够进入生成。
+
+backend/app/rag/evaluator.py
+  离线检索评测，输出 hit_rate、MRR 和 failed_cases。
+
+backend/app/llm/client.py
+  可选 OpenAI-compatible 生成客户端，默认关闭，适合接 vLLM/Qwen。
 
 backend/app/services/memory.py
   会话记忆，Redis 优先，内存 fallback。
@@ -46,6 +55,9 @@ backend/app/services/rate_limit.py
 
 backend/app/services/events.py
   把 Python dict 转成 SSE 文本格式。
+
+backend/app/services/trace.py
+  把任务事件整理成 trace summary，便于前端和排障使用。
 
 backend/app/tools/registry.py
   工具注册、input schema、意图白名单、结构化错误。
@@ -68,10 +80,14 @@ frontend/src/App.vue
 | --- | --- |
 | `GET /api/health` | 健康检查 |
 | `POST /api/ingest` | 写入一份文档，切片后进入检索器 |
+| `GET /api/documents` | 查看文档列表、chunk 数和知识库统计 |
+| `POST /api/retrieve` | 查看 BM25、vector 和 RRF 融合诊断 |
+| `POST /api/eval/retrieval` | 运行默认或自定义 retrieval eval |
 | `POST /api/chat` | 同步执行一次 Agentic RAG |
 | `POST /api/chat/stream` | SSE 流式执行一次 Agentic RAG |
 | `POST /api/tasks` | 创建任务，返回 `task_id` |
 | `GET /api/tasks/{task_id}` | 查询任务状态和事件 |
+| `GET /api/tasks/{task_id}/trace` | 查询任务 trace summary 和事件列表 |
 | `POST /api/tasks/{task_id}/cancel` | 请求取消任务 |
 | `GET /api/tools` | 查看工具 schema |
 | `POST /api/tools/{tool_name}/call` | 直接调用工具 |
@@ -96,6 +112,7 @@ frontend/src/App.vue
 | `intent` | 理解阶段识别出来的意图 |
 | `rewritten_query` | 改写后的检索 query |
 | `evidence` | 检索证据列表 |
+| `quality` | 证据质量判断结果 |
 | `selected_tool` | 当前调用的工具名 |
 | `tool_result` | 工具返回结果 |
 | `answer` | 最终回答 |
@@ -110,7 +127,7 @@ frontend/src/App.vue
 workflow 不是把 prompt 一次性丢给模型，而是拆成几个节点：
 
 ```text
-understand -> retrieve -> rerank -> tool -> answer
+understand -> retrieve -> rerank -> quality -> tool -> answer
 ```
 
 每个节点做完后都会 `yield` 一个事件。这样 API 层可以把事件转成 SSE，前端就能实时看到执行进度。
@@ -119,11 +136,12 @@ understand -> retrieve -> rerank -> tool -> answer
 
 | 节点 | 作用 |
 | --- | --- |
-| `_understand` | 清洗用户输入，识别 `qa` 或 `policy` 意图 |
+| `_understand` | 清洗用户输入，识别 `qa`、`policy` 或 `ticket` 意图 |
 | `_retrieve` | 调用 retriever 找候选证据 |
 | `_rerank` | 对证据排序并保留 top 3 |
+| `_quality_gate` | 判断证据是否足够，证据不足时让 answer 节点拒答 |
 | `_maybe_call_tool` | 根据意图和关键词决定是否调用工具 |
-| `_answer` | 生成最终回答并写入会话记忆 |
+| `_answer` | 调用可选 LLM 或模板 fallback 生成最终回答，并写入会话记忆 |
 
 取消逻辑：
 
@@ -179,6 +197,26 @@ tokenize(query)
 | `_bm25_ranking()` | 做 BM25-style 关键词排名 |
 | `_vector_ranking()` | 做 sparse vector 相似度排名 |
 | `_rrf_fuse()` | 用 RRF 合并多路排名 |
+| `diagnose()` | 返回 query tokens、BM25/vector 排名和融合结果 |
+| `list_documents()` | 聚合展示文档、chunk 和 token 统计 |
+
+## `Evaluator`：检索回归评测
+
+`evaluator.py` 提供轻量 retrieval eval。它关心的是“期望文档是否进入 top_k”，不是最终生成答案是否优雅。
+
+核心指标：
+
+| 指标 | 含义 |
+| --- | --- |
+| `hit_rate` | 期望文档是否出现在 top_k |
+| `mrr` | 第一个期望文档的倒数排名 |
+| `failed_cases` | 没命中的 case，方便回归定位 |
+
+运行入口：
+
+```bash
+python scripts/run_rag_eval.py --top-k 3
+```
 
 RRF 公式直觉：
 
@@ -345,4 +383,3 @@ data: {"evidence_count": 3}
 - 已接入 Milvus/pgvector 真实向量库；
 - 已实现完整 MCP server；
 - 已上线多租户权限和审计系统。
-

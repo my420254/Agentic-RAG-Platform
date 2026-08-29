@@ -119,6 +119,49 @@ class InMemoryRetriever:
             count += 1
         return count
 
+    def list_documents(self) -> list[dict]:
+        """按原始文档维度汇总当前知识库。
+
+        内部 chunk id 形如 `doc_id:index`，对外展示时需要聚合回文档视角。
+        """
+
+        documents: dict[str, dict] = {}
+        for chunk in self._chunks:
+            root_doc_id = chunk.doc_id.rsplit(":", 1)[0]
+            item = documents.setdefault(
+                root_doc_id,
+                {
+                    "doc_id": root_doc_id,
+                    "source": chunk.source,
+                    "chunks": 0,
+                    "tokens": 0,
+                    "sample": chunk.text[:120],
+                },
+            )
+            item["chunks"] += 1
+            item["tokens"] += chunk.length
+        return sorted(documents.values(), key=lambda item: item["doc_id"])
+
+    def stats(self) -> dict:
+        documents = self.list_documents()
+        return {
+            "documents": len(documents),
+            "chunks": len(self._chunks),
+            "tokens": sum(item["tokens"] for item in documents),
+            "sources": sorted({item["source"] for item in documents}),
+        }
+
+    def clear_user_documents(self) -> int:
+        """清空用户临时写入文档，保留内置知识和演示知识。"""
+
+        before = len(self._chunks)
+        self._chunks = [
+            chunk
+            for chunk in self._chunks
+            if chunk.source in {"built_in", "demo_knowledge"}
+        ]
+        return before - len(self._chunks)
+
     def search(self, query: str, *, top_k: int = 5) -> list[Evidence]:
         # 对外只返回 Evidence，workflow 不关心底层检索器怎么实现。
         # 后续替换 Milvus、pgvector 或 Elasticsearch 时，上层代码不用改。
@@ -146,6 +189,40 @@ class InMemoryRetriever:
             )
             for chunk, score, details in fused
         ]
+
+    def diagnose(self, query: str, *, top_k: int = 5) -> dict:
+        """返回检索诊断信息，用于前端和面试展示。
+
+        普通 `/api/chat` 只需要 Evidence；诊断接口会额外暴露 query tokens、
+        原始 BM25/vector 排名和融合结果，方便解释“为什么召回这个 chunk”。
+        """
+
+        query_tokens = tokenize(query)
+        bm25 = self._bm25_ranking(query_tokens)
+        vector = self._vector_ranking(query_tokens)
+        fused = self._rrf_fuse([("bm25", bm25), ("vector", vector)], top_k=top_k)
+        return {
+            "query": query,
+            "tokens": query_tokens,
+            "bm25": [
+                {"doc_id": chunk.doc_id, "score": round(score, 4)}
+                for chunk, score in bm25[:top_k]
+            ],
+            "vector": [
+                {"doc_id": chunk.doc_id, "score": round(score, 4)}
+                for chunk, score in vector[:top_k]
+            ],
+            "fused": [
+                {
+                    "doc_id": chunk.doc_id,
+                    "score": round(score, 4),
+                    "details": {key: round(value, 4) for key, value in details.items()},
+                    "text": chunk.text,
+                    "source": chunk.source,
+                }
+                for chunk, score, details in fused
+            ],
+        }
 
     def _bm25_ranking(self, query_tokens: list[str]) -> list[tuple[DocumentChunk, float]]:
         # BM25-style 分数适合精确业务词：错误码、产品名、API 名、表字段和实体名。

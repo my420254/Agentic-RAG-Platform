@@ -35,9 +35,35 @@ def _policy_lookup(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _ticket_status_lookup(payload: dict[str, Any]) -> dict[str, Any]:
+    ticket_id = str(payload.get("ticket_id") or "").strip().upper()
+    if not ticket_id:
+        return {"ok": False, "error_code": "MISSING_TICKET_ID", "message": "缺少 ticket_id 参数"}
+    demo_status = {
+        "INC-1001": {
+            "status": "retrying",
+            "owner": "payment-platform",
+            "summary": "账单接口超时，已启用指数退避重试。",
+        },
+        "INC-2002": {
+            "status": "mitigated",
+            "owner": "rag-platform",
+            "summary": "向量库慢查询已通过热门 query 缓存缓解。",
+        },
+    }
+    item = demo_status.get(ticket_id)
+    if item is None:
+        return {
+            "ok": False,
+            "error_code": "TICKET_NOT_FOUND",
+            "message": f"未找到工单 {ticket_id}",
+        }
+    return {"ok": True, "ticket_id": ticket_id, **item}
+
+
 class ToolRegistry:
     def __init__(self) -> None:
-        # 当前只放一个示例工具。新增业务工具时，在这里补 ToolSpec 即可。
+        # 新增业务工具时，在这里补 ToolSpec。所有工具必须经过统一 schema 和意图检查。
         self._tools = {
             "policy_lookup": ToolSpec(
                 name="policy_lookup",
@@ -54,7 +80,23 @@ class ToolRegistry:
                     },
                     "required": ["topic"],
                 },
-            )
+            ),
+            "ticket_status_lookup": ToolSpec(
+                name="ticket_status_lookup",
+                description="查询演示工单状态，用于说明实时事实应通过工具而不是静态知识库获取",
+                allowed_intents={"qa", "ticket"},
+                handler=_ticket_status_lookup,
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "ticket_id": {
+                            "type": "string",
+                            "description": "工单编号，例如 INC-1001",
+                        }
+                    },
+                    "required": ["ticket_id"],
+                },
+            ),
         }
 
     def call(self, name: str, payload: dict[str, Any], *, intent: str) -> dict[str, Any]:
@@ -65,7 +107,28 @@ class ToolRegistry:
             return {"ok": False, "error_code": "UNKNOWN_TOOL", "message": f"未知工具: {name}"}
         if intent not in spec.allowed_intents:
             return {"ok": False, "error_code": "INTENT_FORBIDDEN", "message": "当前意图不允许调用该工具"}
+        schema_error = self._validate_payload(payload, spec.input_schema)
+        if schema_error:
+            return {"ok": False, "error_code": "SCHEMA_INVALID", "message": schema_error}
         return spec.handler(payload)
+
+    @staticmethod
+    def _validate_payload(payload: dict[str, Any], schema: dict[str, Any]) -> str:
+        required = schema.get("required", [])
+        for key in required:
+            if key not in payload or payload.get(key) in {None, ""}:
+                return f"缺少必填参数: {key}"
+        properties = schema.get("properties", {})
+        for key, spec in properties.items():
+            if key not in payload:
+                continue
+            expected_type = spec.get("type")
+            value = payload[key]
+            if expected_type == "string" and not isinstance(value, str):
+                return f"参数 {key} 必须是 string"
+            if expected_type == "object" and not isinstance(value, dict):
+                return f"参数 {key} 必须是 object"
+        return ""
 
     def names_for_intent(self, intent: str) -> list[str]:
         return [name for name, spec in self._tools.items() if intent in spec.allowed_intents]

@@ -74,3 +74,25 @@ Function Calling 或 MCP 只能保证参数结构接近 schema，不能保证业
 - 文档能解释真实开发问题。
 
 后续可以逐步把 keyword retriever 替换成 Milvus / pgvector，把 workflow 替换成 LangGraph，把 memory 换成 Redis Cluster 或 Postgres checkpoint。
+
+## 7. 从展示骨架升级到可评测平台
+
+本轮增强把项目从“能跑的 RAG 骨架”推进到“可演示、可评测、可排障”的平台形态：
+
+- 增加文档列表和检索诊断 API，让知识库规模、BM25 排名、向量排名和 RRF 融合结果可见；
+- 增加 `quality` 节点，在证据不足时拒答，而不是把弱证据交给模型硬生成；
+- 增加离线 retrieval eval，输出 Hit@K、MRR 和 failed cases；
+- 增加可选 OpenAI-compatible LLM 客户端，默认模板 fallback，接 vLLM/Qwen 时只需环境变量；
+- 增加演示知识库和脚本，覆盖 RAG 幻觉、Agent Harness、工单故障、向量库慢查询等真实应用问题；
+- 前端增加文档管理、检索诊断和评测展示区。
+
+这个演进的核心不是把项目做大，而是把面试官会追问的问题落实到代码路径：
+
+```text
+召回不准怎么定位 -> /api/retrieve
+有没有评测指标 -> scripts/run_rag_eval.py
+证据不足怎么办 -> quality gate
+如何接本地大模型 -> app/llm/client.py
+工具调用怎么控权 -> ToolRegistry schema + allowed_intents
+执行过程怎么看 -> SSE + task trace
+```

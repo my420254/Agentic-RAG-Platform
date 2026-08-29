@@ -31,6 +31,7 @@ class AgentState:
     intent: str = "qa"
     rewritten_query: str = ""
     evidence: list[Evidence] = field(default_factory=list)
+    quality: dict[str, Any] = field(default_factory=dict)
     selected_tool: str | None = None
     tool_result: dict | None = None
     answer: str = ""

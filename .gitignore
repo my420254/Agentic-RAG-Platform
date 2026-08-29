@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.playwright-cli/
 .ruff_cache/
 .venv/
 venv/
@@ -9,3 +10,4 @@ dist/
 .env
 *.log
 data/runtime/
+output/playwright/

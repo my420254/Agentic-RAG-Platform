@@ -40,7 +40,10 @@ class RateLimiter:
     def allow(self, subject: str, *, limit: int = 120, window_seconds: int = 60) -> RateLimitResult:
         # subject 可以是 session、用户、租户、API key 或模型端点。
         if self._client is not None:
-            return self._allow_redis(subject, limit=limit, window_seconds=window_seconds)
+            try:
+                return self._allow_redis(subject, limit=limit, window_seconds=window_seconds)
+            except Exception:  # pragma: no cover - exercised with fake redis in tests
+                self._client = None
         return self._allow_memory(subject, limit=limit, window_seconds=window_seconds)
 
     def _allow_redis(self, subject: str, *, limit: int, window_seconds: int) -> RateLimitResult:

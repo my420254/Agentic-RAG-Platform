@@ -20,6 +20,12 @@
         <el-button type="primary" :icon="VideoPlay" :loading="loading" @click="send">
           运行
         </el-button>
+        <el-button :icon="Search" @click="diagnoseRetrieval">
+          检索诊断
+        </el-button>
+        <el-button :icon="DataAnalysis" @click="runRetrievalEval">
+          运行评测
+        </el-button>
         <el-button :icon="CloseBold" :disabled="!activeTaskId || !loading" @click="cancelTask">
           取消
         </el-button>
@@ -38,6 +44,20 @@
         <el-descriptions-item label="Events">
           {{ events.length }}
         </el-descriptions-item>
+        <el-descriptions-item label="Docs">
+          {{ docStats?.documents ?? '-' }} / {{ docStats?.chunks ?? '-' }} chunks
+        </el-descriptions-item>
+        <el-descriptions-item label="LLM">
+          <el-tag :type="llmStatusType">{{ llmLabel }}</el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="API">
+          <span class="mono">{{ API_BASE }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="API状态">
+          <el-tag :type="apiError ? 'danger' : 'success'">
+            {{ apiError ? 'error' : 'ready' }}
+          </el-tag>
+        </el-descriptions-item>
       </el-descriptions>
     </el-aside>
 
@@ -45,9 +65,9 @@
       <el-header class="topbar">
         <div>
           <h2>Agentic RAG Console</h2>
-          <p>FastAPI / SSE / Redis / RRF / Tool Registry</p>
+          <p>FastAPI / SSE / Redis / RRF / Tool Registry / vLLM-Qwen</p>
         </div>
-        <el-tag effect="plain">Vue3 + Element Plus</el-tag>
+        <el-tag effect="plain">{{ llmStatus?.model || 'Vue3 + Element Plus' }}</el-tag>
       </el-header>
 
       <el-main class="workspace">
@@ -66,9 +86,41 @@
               {{ item }}
             </el-tag>
           </el-space>
+          <p v-if="apiError" class="error-text">{{ apiError }}</p>
         </el-card>
 
         <div class="grid">
+          <el-card shadow="never">
+            <template #header>
+              <div class="card-head">
+                <span>知识库文档</span>
+                <el-space>
+                  <el-button size="small" text @click="loadDemoKnowledge">演示知识</el-button>
+                  <el-button size="small" text @click="loadDocuments">刷新</el-button>
+                </el-space>
+              </div>
+            </template>
+            <el-form label-position="top" class="ingest-form">
+              <el-form-item label="文档 ID">
+                <el-input v-model="ingestDocId" placeholder="例如 incident_playbook" />
+              </el-form-item>
+              <el-form-item label="文档内容">
+                <el-input v-model="ingestText" type="textarea" :rows="3" resize="none" />
+              </el-form-item>
+              <el-button type="primary" plain :icon="Upload" @click="ingestDocument">
+                写入知识库
+              </el-button>
+            </el-form>
+            <el-scrollbar height="260px" class="doc-list">
+              <el-empty v-if="!documents.length" description="暂无文档" />
+              <section v-for="doc in documents" v-else :key="doc.doc_id" class="doc-item">
+                <strong>{{ doc.doc_id }}</strong>
+                <span>{{ doc.chunks }} chunks · {{ doc.source }}</span>
+                <p>{{ doc.sample }}</p>
+              </section>
+            </el-scrollbar>
+          </el-card>
+
           <el-card shadow="never">
             <template #header>
               <div class="card-head">
@@ -94,6 +146,18 @@
                 </section>
               </div>
             </el-scrollbar>
+          </el-card>
+
+          <el-card shadow="never">
+            <template #header>
+              <div class="card-head">
+                <span>检索诊断 / 评测</span>
+                <el-tag v-if="evalResult" type="success" effect="plain">
+                  Hit@K {{ evalResult.hit_rate }}
+                </el-tag>
+              </div>
+            </template>
+            <pre>{{ diagnosticsText }}</pre>
           </el-card>
 
           <el-card shadow="never">
@@ -144,8 +208,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { CloseBold, Refresh, Tickets, Tools, VideoPlay } from '@element-plus/icons-vue'
+import { computed, onMounted, ref } from 'vue'
+import {
+  CloseBold,
+  DataAnalysis,
+  Refresh,
+  Search,
+  Tickets,
+  Tools,
+  Upload,
+  VideoPlay,
+} from '@element-plus/icons-vue'
 
 type Evidence = {
   doc_id: string
@@ -161,7 +234,43 @@ type RuntimeEvent = {
   data: Record<string, unknown>
 }
 
-const API_BASE = 'http://localhost:8000'
+type DocumentItem = {
+  doc_id: string
+  source: string
+  chunks: number
+  tokens: number
+  sample: string
+}
+
+type DocumentStats = {
+  documents: number
+  chunks: number
+  tokens: number
+  sources: string[]
+}
+
+type EvalResult = {
+  total: number
+  top_k: number
+  hit_rate: number
+  mrr: number
+  failed_cases: unknown[]
+}
+
+type LlmStatus = {
+  enabled: boolean
+  endpoint?: string
+  provider?: string
+  api_base: string
+  model: string
+  reachable?: boolean
+  skipped?: boolean
+  error?: string
+  models?: string[]
+}
+
+const configuredApiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '')
+const API_BASE = configuredApiBase || `${window.location.protocol}//${window.location.hostname}:18080`
 
 const sessionId = ref('demo')
 const message = ref('如何限制 RAG 幻觉？')
@@ -174,6 +283,24 @@ const toolResult = ref<Record<string, unknown> | null>(null)
 const activeTaskId = ref('')
 const status = ref('')
 const loading = ref(false)
+const documents = ref<DocumentItem[]>([])
+const docStats = ref<DocumentStats | null>(null)
+const diagnostics = ref<Record<string, unknown> | null>(null)
+const evalResult = ref<EvalResult | null>(null)
+const llmStatus = ref<LlmStatus | null>(null)
+const apiError = ref('')
+const ingestDocId = ref('team_rag_notes')
+const ingestText = ref('企业知识库回答必须带引用证据；证据不足时应该拒答，并提示补充文档。')
+
+const diagnosticsText = computed(() => {
+  if (evalResult.value) {
+    return JSON.stringify(evalResult.value, null, 2)
+  }
+  if (diagnostics.value) {
+    return JSON.stringify(diagnostics.value, null, 2)
+  }
+  return '点击“检索诊断”查看 BM25 / vector / RRF 排名，点击“运行评测”查看 hit_rate 与 MRR。'
+})
 
 const statusType = computed(() => {
   if (status.value === 'completed') return 'success'
@@ -181,6 +308,26 @@ const statusType = computed(() => {
   if (status.value === 'cancelled' || status.value === 'cancel_requested') return 'warning'
   if (status.value === 'running') return 'primary'
   return 'info'
+})
+
+const llmStatusType = computed(() => {
+  if (!llmStatus.value?.enabled) return 'info'
+  if (llmStatus.value.reachable) return 'success'
+  return 'warning'
+})
+
+const llmLabel = computed(() => {
+  if (!llmStatus.value) return 'checking'
+  if (!llmStatus.value.enabled) return 'template'
+  if (llmStatus.value.reachable) {
+    return `${llmStatus.value.provider || 'llm'} / ${llmStatus.value.model}`
+  }
+  return 'unreachable'
+})
+
+onMounted(() => {
+  void loadDocuments()
+  void loadLlmStatus()
 })
 
 async function send() {
@@ -195,7 +342,13 @@ async function send() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sessionId.value, message: message.value }),
     })
-    if (!response.body) return
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+    if (!response.body) {
+      throw new Error('后端没有返回 SSE 流。')
+    }
+    apiError.value = ''
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
@@ -211,29 +364,113 @@ async function send() {
         handleSseChunk(chunk)
       }
     }
+  } catch (error) {
+    status.value = 'failed'
+    answer.value = `请求失败：${errorMessage(error)}`
+    apiError.value = answer.value
   } finally {
     loading.value = false
-    if (!status.value || status.value === 'running') {
+    if (!status.value || status.value === 'running' || status.value === 'submitting') {
       status.value = 'completed'
     }
   }
+}
+
+async function ingestDocument() {
+  // 写入一份临时文档，便于演示 chunk、召回和文档统计。
+  const result = await requestJson('/api/ingest', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      doc_id: ingestDocId.value,
+      text: ingestText.value,
+      source: 'frontend_manual',
+    }),
+  })
+  if (result) {
+    await loadDocuments()
+  }
+}
+
+async function loadDemoKnowledge() {
+  // 重启后端或清理临时文档后，可一键恢复仓库自带演示知识。
+  const result = await requestJson('/api/demo/load', { method: 'POST' })
+  if (result) {
+    await loadDocuments()
+  }
+}
+
+async function loadDocuments() {
+  // 文档列表用于确认当前知识库规模，避免只看到黑盒回答。
+  const result = await requestJson<{ documents?: DocumentItem[]; stats?: DocumentStats }>('/api/documents')
+  if (!result) return
+  documents.value = result.documents || []
+  docStats.value = result.stats || null
+}
+
+async function loadLlmStatus() {
+  // 读取后端探测到的真实模型状态，用来确认当前是否走本地 vLLM/Qwen。
+  const result = await requestJson<LlmStatus>('/api/llm/status')
+  if (result) {
+    llmStatus.value = result
+  }
+}
+
+async function diagnoseRetrieval() {
+  // 检索诊断暴露 tokens、两路召回和融合结果，方便定位召回问题。
+  const result = await requestJson<Record<string, unknown>>('/api/retrieve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: message.value, top_k: 5 }),
+  })
+  if (!result) return
+  diagnostics.value = result
+  evalResult.value = null
+}
+
+async function runRetrievalEval() {
+  // 使用后端默认评测集跑 hit_rate 和 MRR。
+  const result = await requestJson<EvalResult>('/api/eval/retrieval', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ top_k: 5 }),
+  })
+  if (!result) return
+  evalResult.value = result
+  diagnostics.value = null
 }
 
 async function cancelTask() {
   // 取消不会直接中断浏览器请求，而是把 cancel_requested 写到后端任务状态。
   // workflow 会在节点边界看到这个状态并停止后续节点。
   if (!activeTaskId.value) return
-  const response = await fetch(`${API_BASE}/api/tasks/${activeTaskId.value}/cancel`, {
+  const result = await requestJson<Record<string, unknown>>(`/api/tasks/${activeTaskId.value}/cancel`, {
     method: 'POST',
   })
-  const result = await response.json()
+  if (!result) return
   status.value = String(result.status || 'cancel_requested')
 }
 
 async function loadMemory() {
   // 读取当前 session 的最近对话，用来确认 Redis/内存记忆是否写入成功。
-  const response = await fetch(`${API_BASE}/api/sessions/${sessionId.value}/memory`)
-  memory.value = JSON.stringify(await response.json(), null, 2)
+  const result = await requestJson<Record<string, unknown>>(`/api/sessions/${sessionId.value}/memory`)
+  if (result) {
+    memory.value = JSON.stringify(result, null, 2)
+  }
+}
+
+async function requestJson<T>(path: string, options?: RequestInit): Promise<T | null> {
+  try {
+    const response = await fetch(`${API_BASE}${path}`, options)
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+    apiError.value = ''
+    return await response.json()
+  } catch (error) {
+    apiError.value = `API 请求失败：${errorMessage(error)}`
+    return null
+  }
 }
 
 function resetRun() {
@@ -294,6 +531,10 @@ function statusFromEvent(type: string, data: Record<string, unknown>) {
 
 function compact(data: Record<string, unknown>) {
   return JSON.stringify(data)
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
 }
 </script>
 
@@ -383,6 +624,13 @@ function compact(data: Record<string, unknown>) {
   border-radius: 8px;
 }
 
+.error-text {
+  margin: 12px 0 0;
+  color: #b42318;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .card-head {
   display: flex;
   align-items: center;
@@ -406,11 +654,42 @@ function compact(data: Record<string, unknown>) {
   gap: 12px;
 }
 
+.ingest-form {
+  margin-bottom: 14px;
+}
+
+.doc-list {
+  border-top: 1px solid #edf2f7;
+  padding-top: 12px;
+}
+
+.doc-item,
 .evidence-item {
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   background: #fbfcfe;
   padding: 12px;
+}
+
+.doc-item + .doc-item {
+  margin-top: 10px;
+}
+
+.doc-item strong,
+.doc-item span {
+  display: block;
+}
+
+.doc-item span {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.doc-item p {
+  margin: 8px 0 0;
+  color: #334155;
+  line-height: 1.55;
 }
 
 .item-head {

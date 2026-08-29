@@ -60,13 +60,16 @@ class TaskService:
     def get_task(self, task_id: str) -> TaskRecord | None:
         # Redis 中任务元信息和事件列表分开存，这样裁剪事件列表时不用重写整个任务记录。
         if self._client is not None:
-            raw = self._client.get(self._task_key(task_id))
-            if not raw:
-                return None
-            data = json.loads(raw)
-            events = self._client.lrange(self._events_key(task_id), -100, -1)
-            data["events"] = [json.loads(item) for item in events]
-            return TaskRecord(**data)
+            try:
+                raw = self._client.get(self._task_key(task_id))
+                if not raw:
+                    return None
+                data = json.loads(raw)
+                events = self._client.lrange(self._events_key(task_id), -100, -1)
+                data["events"] = [json.loads(item) for item in events]
+                return TaskRecord(**data)
+            except Exception:  # pragma: no cover - exercised with fake redis in tests
+                self._client = None
         with self._lock:
             return self._fallback.get(task_id)
 
@@ -86,14 +89,21 @@ class TaskService:
         if record is None:
             return None
         if self._client is not None:
-            self._client.set(self._cancel_key(task_id), "1", ex=3600)
+            try:
+                self._client.set(self._cancel_key(task_id), "1", ex=3600)
+            except Exception:  # pragma: no cover - exercised with fake redis in tests
+                self._client = None
         return record
 
     def is_cancelled(self, task_id: str | None) -> bool:
         if not task_id:
             return False
-        if self._client is not None and self._client.get(self._cancel_key(task_id)):
-            return True
+        if self._client is not None:
+            try:
+                if self._client.get(self._cancel_key(task_id)):
+                    return True
+            except Exception:  # pragma: no cover - exercised with fake redis in tests
+                self._client = None
         record = self.get_task(task_id)
         return record is not None and record.status in {"cancel_requested", "cancelled"}
 
@@ -108,10 +118,13 @@ class TaskService:
             "created_at": utc_now(),
         }
         if self._client is not None:
-            key = self._events_key(task_id)
-            self._client.rpush(key, json.dumps(item, ensure_ascii=False))
-            self._client.ltrim(key, -100, -1)
-            return
+            try:
+                key = self._events_key(task_id)
+                self._client.rpush(key, json.dumps(item, ensure_ascii=False))
+                self._client.ltrim(key, -100, -1)
+                return
+            except Exception:  # pragma: no cover - exercised with fake redis in tests
+                self._client = None
         with self._lock:
             record = self._fallback.get(task_id)
             if record is None:
@@ -123,10 +136,13 @@ class TaskService:
 
     def _save(self, record: TaskRecord) -> None:
         if self._client is not None:
-            data = asdict(record)
-            data["events"] = []
-            self._client.set(self._task_key(record.task_id), json.dumps(data, ensure_ascii=False), ex=86400)
-            return
+            try:
+                data = asdict(record)
+                data["events"] = []
+                self._client.set(self._task_key(record.task_id), json.dumps(data, ensure_ascii=False), ex=86400)
+                return
+            except Exception:  # pragma: no cover - exercised with fake redis in tests
+                self._client = None
         with self._lock:
             self._fallback[record.task_id] = record
 

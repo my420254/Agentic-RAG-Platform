@@ -96,7 +96,87 @@ workflow 节点边界检查取消状态
 - 工具层：实时事实以工具或数据库返回为准；
 - 审计层：citation、trace、答案校验和人工接管。
 
-## 11. 生产化还需要补什么？
+## 11. RAG 如何做评测？
+
+先从检索评测做起，因为检索没命中时，生成再强也没有依据。当前项目实现了：
+
+```bash
+python scripts/run_rag_eval.py --top-k 3
+```
+
+核心指标：
+
+- `Hit@K`：期望文档是否进入前 K 个结果；
+- `MRR`：第一个正确文档排得越靠前越好；
+- `failed_cases`：失败样本必须保留下来，作为后续修复的回归集。
+
+生产中还可以继续补：
+
+- answer correctness；
+- faithfulness；
+- citation precision；
+- 人工标注 golden set；
+- 线上 badcase 回流。
+
+## 12. 为什么要做证据质量门控？
+
+因为 top_k 有结果不等于证据可靠。错误证据、弱相关证据、过期证据都会诱导模型编答案。
+
+当前项目有独立 `quality` 节点：
+
+```text
+understand -> retrieve -> rerank -> quality -> tool -> answer
+```
+
+如果证据为空或分数低于阈值，answer 节点会拒答。这样可以回答面试里的“如何治理幻觉”问题：不是只改 prompt，而是在检索和生成之间加质量闸门。
+
+## 13. 如何接 vLLM / Qwen？
+
+默认关闭模型调用，保证开箱演示稳定。需要接本地 OpenAI-compatible 服务时：
+
+```bash
+export RAG_USE_LLM=true
+export LLM_API_BASE=http://192.168.27.250:18003/v1
+export LLM_MODEL=Qwen3.6-27B
+export LLM_API_KEY=qwen-local-key
+export LLM_ENABLE_THINKING=false
+```
+
+模型只负责最终语言生成；检索、rerank、工具权限、证据门控、任务取消和 Trace 都由后端控制。
+
+远程打开前端时，不要把 API 地址写死成浏览器本机的 `localhost`。当前前端会自动根据页面主机推断后端地址：
+
+```text
+http://<应用服务器IP>:5173 -> http://<应用服务器IP>:18080
+```
+
+如果前后端分开部署，则通过 `VITE_API_BASE` 指定。
+
+## 14. 一万并发或十万峰值怎么设计？
+
+不能让 FastAPI 同步扛所有模型推理。合理拆法是：
+
+```text
+API Gateway
+  -> FastAPI Ingress
+  -> Redis 限流
+  -> Kafka / Redis Stream 削峰
+  -> Agent Worker
+  -> Retriever / Reranker
+  -> vLLM Serving Pool
+  -> SSE Gateway
+```
+
+关键回答点：
+
+- API 层只做接入、鉴权、限流和任务创建；
+- 重任务进入队列，由 worker 消费；
+- Redis 保存短期状态、取消标记、checkpoint 和热点缓存；
+- vLLM 独立扩容，通过 batching 提升吞吐；
+- reranker 要做批处理和缓存；
+- 事件流和 Trace 独立，不阻塞主链路。
+
+## 15. 生产化还需要补什么？
 
 当前仓库是可扩展骨架，生产化可继续补充：
 
